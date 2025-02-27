@@ -32,44 +32,55 @@
     // Add button to page
     document.body.appendChild(button);
 
-    // Handle click event
-    button.addEventListener('click', async () => {
-        try {
-            // Visual feedback
-            button.innerHTML = 'Loading...';
-            button.disabled = true;
+    async function getOrderDetails(order) {
+        const viewMoreButton = order.querySelector('button');
+        if (!viewMoreButton) return null;
 
-            // Function to load all orders
-            async function loadAllOrders() {
-                const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
-                let previousHeight = 0;
-                
-                while (true) {
-                    window.scrollTo(0, document.documentElement.scrollHeight);
-                    await delay(1500); // Increased delay for reliability
-                    
-                    const currentHeight = document.documentElement.scrollHeight;
-                    if (currentHeight === previousHeight) {
-                        break;
-                    }
-                    previousHeight = currentHeight;
-                }
-                
-                // Scroll back to top and wait for final render
-                window.scrollTo(0, 0);
-                await delay(1000);
-                
-                return document.querySelectorAll('[class*="d_flex border_solid_1px_"]');
-            }
+        viewMoreButton.click();
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
-            // Load all orders and wait for completion
-            const orders = await loadAllOrders();
-            
-            // Prepare CSV data
-            const csvRows = [['Order ID', 'Date', 'Total', 'Status', 'Item Name', 'Quantity']];
+        const details = {
+            paymentMethod: document.querySelector('.MuiDialog-root .MuiDialogContent-root div:nth-child(4) div:nth-child(1) p:nth-child(2) div')?.textContent?.trim().replace(/^-$/, '') || '',
+            subtotal: document.querySelector('.MuiDialog-root .MuiDialogContent-root div:nth-child(4) div:nth-child(2) p:nth-child(2)')?.textContent?.trim(),
+            cashbackUsed: document.querySelector('.MuiDialog-root .MuiDialogContent-root div:nth-child(4) div:nth-child(3) p:nth-child(2)')?.textContent?.trim(),
+            totalPaid: document.querySelector('.MuiDialog-root .MuiDialogContent-root div:nth-child(4) div:nth-child(4) p:nth-child(2) strong')?.textContent?.trim()
+        };
 
-            // Process each order
-            orders.forEach(order => {
+        // Close modal by clicking outside
+        const modalBackdrop = document.querySelector('.MuiDialog-root');
+        if (modalBackdrop) {
+            modalBackdrop.click();
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        return details;
+    }
+
+    // Add helper function to convert currency string to number
+    function currencyToNumber(currencyStr) {
+        if (!currencyStr) return 0;
+        return parseFloat(currencyStr.replace(/[$,]/g, '')) || 0;
+    }
+
+    async function loadAllOrders() {
+        let lastHeight = 0;
+        let currentHeight = document.documentElement.scrollHeight;
+
+        // Scroll to bottom until no new content loads
+        while (lastHeight !== currentHeight) {
+            lastHeight = currentHeight;
+            window.scrollTo(0, document.documentElement.scrollHeight);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            currentHeight = document.documentElement.scrollHeight;
+        }
+
+        // Get all orders
+        const orders = Array.from(document.querySelectorAll('section.flex_1 > div > div > div > div'));
+        const orderData = [];
+
+        // Process each order
+        for (const order of orders) {
+            try {
                 const orderId = order.querySelector('[class*="fs_sbds-global-font-size-4"]').textContent.trim();
                 
                 const dateStr = order.querySelector('[class*="fs_sbds-global-font-size-3"]').textContent.trim();
@@ -80,7 +91,6 @@
                 // Convert 12-hour to 24-hour time
                 let [hours, minutes] = timeStr.split(':');
                 hours = parseInt(hours);
-                // Convert to 24-hour format
                 if (period === 'PM' && hours !== 12) {
                     hours += 12;
                 } else if (period === 'AM' && hours === 12) {
@@ -95,28 +105,83 @@
                 const itemName = order.querySelector('[class*="-webkit-line-clamp_1"]').textContent.trim().replace(/,/g, '');
                 const quantity = order.querySelector('[class*="flex_0_0_auto"]').textContent.trim().replace('x', '');
 
-                csvRows.push([orderId, formattedDate, total, status, itemName, quantity]);
-            });
+                // Get additional details from modal
+                const modalDetails = await getOrderDetails(order);
 
-            // Generate and download CSV
-            const csvContent = csvRows.map(row => row.join(',')).join('\n');
-            const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.setAttribute('href', url);
-            link.setAttribute('download', 'shopback_orders.csv');
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
+                // Convert monetary values to numbers for calculation
+                const subtotalNum = currencyToNumber(modalDetails?.subtotal);
+                const cashbackUsedNum = currencyToNumber(modalDetails?.cashbackUsed);
+                const totalPaidNum = currencyToNumber(modalDetails?.totalPaid);
 
+                // Calculate promos (negative value means discount applied)
+                const promosAmount = totalPaidNum - (subtotalNum + cashbackUsedNum);
+                const promos = promosAmount !== 0 ? `$${promosAmount.toFixed(2)}` : '';
+
+                orderData.push({
+                    orderId,
+                    date: formattedDate,
+                    total,
+                    status,
+                    itemName,
+                    quantity,
+                    paymentMethod: modalDetails?.paymentMethod || '',
+                    subtotal: modalDetails?.subtotal || '',
+                    cashbackUsed: modalDetails?.cashbackUsed || '',
+                    promos,
+                    totalPaid: modalDetails?.totalPaid || ''
+                });
+            } catch (error) {
+                console.error('Error processing order:', error);
+                // Continue with next order if one fails
+                continue;
+            }
+        }
+
+        return orderData;
+    }
+
+    // Handle click event
+    button.addEventListener('click', async () => {
+        button.disabled = true;
+        button.innerHTML = 'Loading orders...';
+
+        try {
+            const orders = await loadAllOrders();
+            
+            // Convert to CSV
+            const headers = ['Order ID', 'Date', 'Total', 'Status', 'Item Name', 'Quantity', 'Payment Method', 'Subtotal', 'Cashback Used', 'Promos', 'Total Paid'];
+            const csv = [
+                headers.join(','),
+                ...orders.map(order => [
+                    order.orderId,
+                    order.date,
+                    order.total,
+                    order.status,
+                    order.itemName,
+                    order.quantity,
+                    order.paymentMethod,
+                    order.subtotal,
+                    order.cashbackUsed,
+                    order.promos,
+                    order.totalPaid
+                ].join(','))
+            ].join('\n');
+
+            // Download CSV
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.setAttribute('hidden', '');
+            a.setAttribute('href', url);
+            a.setAttribute('download', 'shopback_orders.csv');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
         } catch (error) {
             console.error('Error:', error);
-            alert('Error processing orders. Check console for details.');
         } finally {
-            // Reset button state
-            button.innerHTML = 'Download as CSV';
             button.disabled = false;
+            button.innerHTML = 'Download as CSV';
         }
     });
 })();
